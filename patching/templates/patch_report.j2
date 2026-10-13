@@ -1,0 +1,25 @@
+==========================================================================
+ PATCHING REPORT
+==========================================================================
+ Host            : {{ inventory_hostname }} ({{ ansible_facts.fqdn }})
+ OS              : {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+ Kernel (running): {{ ansible_facts.kernel }}
+ Generated       : {{ ansible_facts.date_time.iso8601 }}
+ Mode            : {{ 'security updates only' if security_only | bool else 'all updates' }}
+ Excluded        : {{ patch_exclude | join(', ') if patch_exclude else 'none' }}
+ STATUS          : {{ 'FAILED' if patch_error is defined else 'SUCCESS' }}
+ Packages updated: {{ packages_updated | length }}
+ Reboot required : {{ 'YES' if reboot_required | bool else 'no' }}
+==========================================================================
+{% if patch_error is defined %}
+
+--- ERROR ----------------------------------------------------------------
+{{ patch_error }}
+{% endif %}
+
+--- UPDATED / INSTALLED PACKAGES (new versions) --------------------------
+{% for pkg in packages_updated %}
+{{ pkg }}
+{% else %}
+None
+{% endfor %}

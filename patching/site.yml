@@ -1,0 +1,19 @@
+---
+# Full patching workflow. Hosts that fail a phase are dropped from later phases.
+#
+#   ansible-playbook site.yml                         # all phases
+#   ansible-playbook site.yml --limit web01           # single host
+#   ansible-playbook 01_vuln_check.yml                # any phase on its own
+#   ansible-playbook site.yml -e security_only=true   # security updates only
+#   ansible-playbook site.yml -e reboot_confirm=no    # skip the reboot prompt
+- name: Vulnerability check
+  ansible.builtin.import_playbook: 01_vuln_check.yml
+
+- name: Pre-patch health check
+  ansible.builtin.import_playbook: 02_prepatch.yml
+
+- name: Apply patches
+  ansible.builtin.import_playbook: 03_patch.yml
+
+- name: Post-patch reboot and sanity check
+  ansible.builtin.import_playbook: 04_postpatch.yml

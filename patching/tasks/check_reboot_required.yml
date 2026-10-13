@@ -1,0 +1,23 @@
+---
+# Sets fact `reboot_required` (bool) for the current host.
+- name: Check if reboot is required (RedHat family)
+  ansible.builtin.command: dnf needs-restarting -r
+  register: needs_restarting
+  changed_when: false
+  failed_when: false
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Check if reboot is required (Debian family)
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: reboot_required_file
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Set reboot_required fact
+  ansible.builtin.set_fact:
+    # needs-restarting -r: rc 0 = not needed, rc 1 = needed. Any other rc
+    # (plugin missing, error) is treated as "needed" to be safe.
+    reboot_required: >-
+      {{ (needs_restarting.rc | default(0)) != 0
+         if ansible_facts.os_family == 'RedHat'
+         else (reboot_required_file.stat.exists | default(false)) }}

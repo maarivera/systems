@@ -1,0 +1,65 @@
+---
+# Phase 1: Vulnerability check.
+# Lists security advisories and all applicable updates for each host.
+# Report: <log_dir>/vuln_check_<YYYYMMDD>.log
+- name: "Phase 1 | Vulnerability check - applicable patches"
+  hosts: patch_targets
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Verify OS family is supported
+      ansible.builtin.assert:
+        that: ansible_facts.os_family in ['RedHat', 'Debian']
+        fail_msg: "Unsupported OS family: {{ ansible_facts.os_family }}"
+        quiet: true
+
+    - name: Collect applicable patches (RedHat family)
+      when: ansible_facts.os_family == 'RedHat'
+      block:
+        - name: List security advisories
+          ansible.builtin.command: dnf -q updateinfo list --security
+          register: rh_security
+          changed_when: false
+
+        - name: List all available updates
+          ansible.builtin.command: dnf -q check-update
+          register: rh_updates
+          changed_when: false
+          # check-update: rc 100 = updates available, 0 = none, 1 = error
+          failed_when: rh_updates.rc not in [0, 100]
+
+        - name: Parse RedHat results
+          ansible.builtin.set_fact:
+            vuln_security: "{{ rh_security.stdout_lines | select('match', '^\\S+\\s+\\S+') | reject('match', '^Name\\s') | list }}"
+            vuln_all: "{{ rh_updates.stdout_lines | select('match', '^\\S+\\.\\S+\\s+\\S+\\s+\\S+') | list }}"
+
+    - name: Collect applicable patches (Debian family)
+      when: ansible_facts.os_family == 'Debian'
+      block:
+        - name: Refresh apt cache
+          ansible.builtin.apt:
+            update_cache: true
+          changed_when: false
+
+        - name: Simulate full upgrade
+          ansible.builtin.command: apt-get -s dist-upgrade
+          register: deb_sim
+          changed_when: false
+
+        - name: Parse Debian results
+          ansible.builtin.set_fact:
+            vuln_all: "{{ deb_sim.stdout_lines | select('match', '^Inst ') | map('regex_replace', '^Inst ', '') | list }}"
+            vuln_security: "{{ deb_sim.stdout_lines | select('match', '^Inst ') | select('search', '(?i)security') | map('regex_replace', '^Inst ', '') | list }}"
+
+    - name: Write vulnerability report
+      ansible.builtin.template:
+        src: templates/vuln_report.j2
+        dest: "{{ log_dir }}/vuln_check_{{ log_date }}.log"
+        mode: "0640"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ vuln_security | length }} security / {{ vuln_all | length }} total
+          applicable updates. Report: {{ log_dir }}/vuln_check_{{ log_date }}.log

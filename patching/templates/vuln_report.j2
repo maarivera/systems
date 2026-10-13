@@ -1,0 +1,24 @@
+==========================================================================
+ VULNERABILITY CHECK - APPLICABLE PATCHES
+==========================================================================
+ Host       : {{ inventory_hostname }} ({{ ansible_facts.fqdn }})
+ OS         : {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+ Kernel     : {{ ansible_facts.kernel }}
+ Generated  : {{ ansible_facts.date_time.iso8601 }}
+ Security   : {{ vuln_security | length }} update(s)
+ Total      : {{ vuln_all | length }} update(s)
+==========================================================================
+
+--- SECURITY UPDATES -----------------------------------------------------
+{% for line in vuln_security %}
+{{ line }}
+{% else %}
+None
+{% endfor %}
+
+--- ALL APPLICABLE UPDATES -----------------------------------------------
+{% for line in vuln_all %}
+{{ line }}
+{% else %}
+None - system is up to date
+{% endfor %}

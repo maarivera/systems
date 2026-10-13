@@ -1,0 +1,36 @@
+==========================================================================
+ PRE-PATCH CHECK
+==========================================================================
+ Host       : {{ inventory_hostname }} ({{ ansible_facts.fqdn }})
+ OS         : {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+ Kernel     : {{ ansible_facts.kernel }}
+ CPUs       : {{ ansible_facts.processor_vcpus | default("n/a") }} vCPU
+ Memory     : {{ ansible_facts.memtotal_mb | default("n/a") }} MB total / {{ ansible_facts.memfree_mb | default("n/a") }} MB free
+ Generated  : {{ ansible_facts.date_time.iso8601 }}
+ STATUS     : {{ prepatch_status }}
+==========================================================================
+
+--- DISK SPACE THRESHOLDS ------------------------------------------------
+{% for line in disk_checked %}
+{{ line }}
+{% endfor %}
+{% if disk_issues %}
+FAILED:
+{% for issue in disk_issues %}
+  - {{ issue }}
+{% endfor %}
+{% else %}
+OK - all checked mounts above threshold
+{% endif %}
+
+--- FAILED SYSTEMD UNITS -------------------------------------------------
+{{ failed_units.stdout if failed_units.stdout else 'None' }}
+
+{% for r in prepatch_out.results %}
+--- {{ r.item.name | upper }} {{ '-' * (68 - r.item.name | length) }}
+{{ r.stdout }}
+{% if r.rc != 0 and r.stderr %}
+[rc={{ r.rc }}] {{ r.stderr }}
+{% endif %}
+
+{% endfor %}

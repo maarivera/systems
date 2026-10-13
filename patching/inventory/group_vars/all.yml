@@ -1,0 +1,67 @@
+---
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+# Reports are written on each target server:
+#   <log_dir>/vuln_check_<YYYYMMDD>.log
+#   <log_dir>/prepatch_check_<YYYYMMDD>.log
+#   <log_dir>/patching_<YYYYMMDD>.log
+#   <log_dir>/postpatch_check_<YYYYMMDD>.log
+log_dir: /var/log
+log_date: "{{ ansible_facts.date_time.date | replace('-', '') }}"
+
+# Snapshot of running services taken at pre-patch, compared after reboot.
+state_dir: /var/lib/patching
+
+# ---------------------------------------------------------------------------
+# Pre-patch
+# ---------------------------------------------------------------------------
+# Minimum free space (MB) per mount point. Mounts that don't exist on a host
+# are skipped. A host below any threshold FAILS pre-patch and is not patched.
+min_free_mb:
+  /: 2048
+  /var: 2048
+  /boot: 200
+
+# ---------------------------------------------------------------------------
+# Patching
+# ---------------------------------------------------------------------------
+# true  = only security updates
+# false = all available updates
+security_only: false
+
+# Packages to leave untouched.
+# RedHat: globs allowed (e.g. 'kernel*'). Debian: exact package names only
+# (they are put on hold for the run, then released).
+patch_exclude: []
+
+# ---------------------------------------------------------------------------
+# Post-patch / sanity
+# ---------------------------------------------------------------------------
+reboot_timeout: 1200
+
+# Services that MUST be running after patching/reboot (".service" optional).
+critical_services: "{{ ['ssh'] if ansible_facts.os_family == 'Debian' else ['sshd'] }}"
+
+# TCP ports that must be listening after patching/reboot, e.g. [22, 80, 443].
+sanity_ports: []
+
+# Fail sanity if a service that was running at pre-patch is no longer running.
+fail_on_missing_services: true
+
+# Regexes for services that are expected to come and go (on-demand/transient)
+# and should not be reported as "missing" after reboot.
+services_ignore_missing:
+  - '^user@'
+  - '^user-runtime-dir@'
+  - '^session-'
+  - '^getty@'
+  - '^serial-getty@'
+  - '^systemd-(hostnamed|localed|timedated|logind)\.service$'
+  - '^packagekit'
+  - '^fwupd'
+  - '^dnf-makecache'
+  - '^apt-daily'
+  - '^unattended-upgrades'
+  - '^udisks2'
+  - '^polkit'

@@ -1,0 +1,115 @@
+---
+# Phase 3: Apply patches.
+# Report: <log_dir>/patching_<YYYYMMDD>.log (packages updated, reboot needed)
+- name: "Phase 3 | Apply patches"
+  hosts: patch_targets
+  become: true
+  gather_facts: true
+
+  vars:
+    patch_log: "{{ log_dir }}/patching_{{ log_date }}.log"
+    pkg_query_cmd:
+      RedHat: rpm -qa --qf '%{NAME}.%{ARCH} %{VERSION}-%{RELEASE}\n'
+      Debian: dpkg-query -W -f='${Package}:${Architecture} ${Version}\n'
+
+  tasks:
+    - name: Verify OS family is supported
+      ansible.builtin.assert:
+        that: ansible_facts.os_family in ['RedHat', 'Debian']
+        fail_msg: "Unsupported OS family: {{ ansible_facts.os_family }}"
+        quiet: true
+
+    - name: Record installed packages before patching
+      ansible.builtin.command: "{{ pkg_query_cmd[ansible_facts.os_family] }}"
+      register: pkgs_before
+      changed_when: false
+
+    - name: Apply patches
+      block:
+        - name: Patch RedHat family hosts
+          ansible.builtin.dnf:
+            name: "*"
+            state: latest
+            security: "{{ security_only | bool }}"
+            exclude: "{{ patch_exclude }}"
+            update_cache: true
+          when: ansible_facts.os_family == 'RedHat'
+
+        - name: Patch Debian family hosts
+          when: ansible_facts.os_family == 'Debian'
+          environment:
+            # Ubuntu needrestart: list only, don't auto-restart services.
+            NEEDRESTART_MODE: l
+          block:
+            - name: Hold excluded packages
+              ansible.builtin.dpkg_selections:
+                name: "{{ item }}"
+                selection: hold
+              loop: "{{ patch_exclude }}"
+
+            - name: Refresh apt cache
+              ansible.builtin.apt:
+                update_cache: true
+              changed_when: false
+
+            - name: Determine pending security updates
+              ansible.builtin.command: apt-get -s dist-upgrade
+              register: deb_sim
+              changed_when: false
+              when: security_only | bool
+
+            - name: Apply security updates only
+              ansible.builtin.apt:
+                name: "{{ deb_sim.stdout_lines | select('match', '^Inst ') | select('search', '(?i)security')
+                          | map('regex_replace', '^Inst (\\S+).*$', '\\1') | list }}"
+                state: latest
+                only_upgrade: true
+              when:
+                - security_only | bool
+                - deb_sim.stdout_lines | select('match', '^Inst ') | select('search', '(?i)security') | list | length > 0
+
+            - name: Apply all available updates
+              ansible.builtin.apt:
+                upgrade: dist
+              when: not security_only | bool
+
+          always:
+            - name: Release held packages
+              ansible.builtin.dpkg_selections:
+                name: "{{ item }}"
+                selection: install
+              loop: "{{ patch_exclude }}"
+
+      rescue:
+        - name: Record patching error
+          ansible.builtin.set_fact:
+            patch_error: "{{ ansible_failed_result.msg | default('unknown error') }}"
+
+    - name: Record installed packages after patching
+      ansible.builtin.command: "{{ pkg_query_cmd[ansible_facts.os_family] }}"
+      register: pkgs_after
+      changed_when: false
+
+    - name: Determine updated packages
+      ansible.builtin.set_fact:
+        packages_updated: "{{ pkgs_after.stdout_lines | difference(pkgs_before.stdout_lines) | sort }}"
+
+    - name: Check whether a reboot is required
+      ansible.builtin.include_tasks: tasks/check_reboot_required.yml
+
+    - name: Write patching report
+      ansible.builtin.template:
+        src: templates/patch_report.j2
+        dest: "{{ patch_log }}"
+        mode: "0640"
+
+    - name: Fail host if patching failed
+      ansible.builtin.fail:
+        msg: "Patching FAILED: {{ patch_error }}. See {{ patch_log }}"
+      when: patch_error is defined
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ packages_updated | length }} package(s) updated.
+          Reboot required: {{ reboot_required | bool }}. Report: {{ patch_log }}

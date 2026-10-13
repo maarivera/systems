@@ -1,0 +1,53 @@
+==========================================================================
+ POST-PATCH SANITY CHECK
+==========================================================================
+ Host            : {{ inventory_hostname }} ({{ ansible_facts.fqdn }})
+ OS              : {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+ Kernel (running): {{ ansible_facts.kernel }}
+ Generated       : {{ ansible_facts.date_time.iso8601 }}
+ Reboot choice   : {{ reboot_choice }}
+ Rebooted        : {{ 'YES (' ~ reboot_result.elapsed | default('?') ~ 's)' if reboot_result is changed else 'no' }}
+ Reboot required : before={{ 'yes' if reboot_required_before | bool else 'no' }} now={{ 'yes' if reboot_required | bool else 'no' }}
+ STATUS          : {{ 'PASS' if sanity_issues | length == 0 else 'FAIL' }}
+==========================================================================
+{% if sanity_issues %}
+
+--- ISSUES ---------------------------------------------------------------
+{% for issue in sanity_issues %}
+  - {{ issue }}
+{% endfor %}
+{% endif %}
+
+--- CRITICAL SERVICES ----------------------------------------------------
+{% for svc in critical_services %}
+{{ '%-40s' | format(svc) }} {{ 'NOT RUNNING' if (svc | regex_replace('\\.service$', '') ~ '.service') in critical_down else 'running' }}
+{% else %}
+None configured
+{% endfor %}
+
+--- REQUIRED PORTS -------------------------------------------------------
+{% for port in sanity_ports %}
+{{ '%-40s' | format(port) }} {{ 'NOT LISTENING' if port in ports_down else 'listening' }}
+{% else %}
+None configured
+{% endfor %}
+
+--- SERVICES COMPARED TO PRE-PATCH ---------------------------------------
+{% if not services_snapshot_found | bool %}
+Pre-patch snapshot not found ({{ state_dir }}/services_before.txt) - skipped
+{% else %}
+Stopped since pre-patch : {{ services_missing | join(', ') if services_missing else 'none' }}
+Started since pre-patch : {{ services_new | join(', ') if services_new else 'none' }}
+{% endif %}
+
+--- FAILED SYSTEMD UNITS -------------------------------------------------
+{{ failed_units.stdout if failed_units.stdout else 'None' }}
+
+{% for r in sanity_out.results %}
+--- {{ r.item.name | upper }} {{ '-' * (68 - r.item.name | length) }}
+{{ r.stdout }}
+{% if r.rc != 0 and r.stderr %}
+[rc={{ r.rc }}] {{ r.stderr }}
+{% endif %}
+
+{% endfor %}

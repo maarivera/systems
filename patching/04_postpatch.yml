@@ -1,0 +1,154 @@
+---
+# Phase 4: Post-patch.
+# Asks whether to restart the servers, reboots, then runs sanity checks.
+# Report: <log_dir>/postpatch_check_<YYYYMMDD>.log
+#
+# Skip the prompt (e.g. for automation) with: -e reboot_confirm=yes|required|no
+- name: "Phase 4 | Post-patch reboot and sanity check"
+  hosts: patch_targets
+  become: true
+  gather_facts: true
+
+  vars:
+    postpatch_log: "{{ log_dir }}/postpatch_check_{{ log_date }}.log"
+    sanity_commands:
+      - name: Uptime / load average
+        cmd: uptime
+      - name: Last boot
+        cmd: who -b
+      - name: Free disk space
+        cmd: df -hPT -x tmpfs -x devtmpfs -x squashfs -x overlay
+      - name: Memory
+        cmd: free -h
+      - name: CPU utilisation
+        cmd: top -bn1 | head -n 5
+      - name: Listening ports
+        cmd: ss -tulpn
+
+  tasks:
+    # ----------------------------------------------------------------------
+    # Reboot decision
+    # ----------------------------------------------------------------------
+    - name: Check whether a reboot is required
+      ansible.builtin.include_tasks: tasks/check_reboot_required.yml
+
+    - name: Ask whether to restart servers
+      ansible.builtin.pause:
+        prompt: |-
+
+          ================================================================
+           Patching complete.
+             Reboot required     : {{ ansible_play_hosts | map('extract', hostvars) | selectattr('reboot_required') | map(attribute='inventory_hostname') | join(', ') or 'none' }}
+             Reboot not required : {{ ansible_play_hosts | map('extract', hostvars) | rejectattr('reboot_required') | map(attribute='inventory_hostname') | join(', ') or 'none' }}
+          ================================================================
+           Would you like to restart the servers?
+             yes      - reboot ALL patched servers
+             required - reboot only servers that require it
+             no       - do not reboot (sanity checks still run)
+          Answer
+      register: reboot_prompt
+      run_once: true
+      when: reboot_confirm is not defined
+
+    - name: Record reboot decision
+      vars:
+        answer: "{{ (reboot_confirm | default(reboot_prompt.user_input | default('no'))) | string | trim | lower }}"
+      ansible.builtin.set_fact:
+        reboot_choice: >-
+          {{ 'yes' if answer in ['y', 'yes', 'true']
+             else 'required' if answer in ['r', 'req', 'required']
+             else 'no' }}
+        reboot_required_before: "{{ reboot_required | bool }}"
+
+    - name: Reboot server
+      ansible.builtin.reboot:
+        msg: "Reboot initiated by Ansible after patching"
+        reboot_timeout: "{{ reboot_timeout }}"
+      register: reboot_result
+      when: reboot_choice == 'yes' or (reboot_choice == 'required' and reboot_required | bool)
+
+    - name: Refresh facts after reboot
+      ansible.builtin.setup:
+      when: reboot_result is changed
+
+    # ----------------------------------------------------------------------
+    # Sanity checks
+    # ----------------------------------------------------------------------
+    - name: Run sanity checks
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop: "{{ sanity_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: sanity_out
+      changed_when: false
+      failed_when: false
+
+    - name: List failed systemd units
+      ansible.builtin.command: systemctl --failed --no-legend --no-pager --plain
+      register: failed_units
+      changed_when: false
+      failed_when: false
+
+    - name: Gather service state
+      ansible.builtin.service_facts:
+
+    - name: Read pre-patch services snapshot
+      ansible.builtin.slurp:
+        src: "{{ state_dir }}/services_before.txt"
+      register: services_before_file
+      failed_when: false
+
+    - name: Check required ports are listening
+      # Retries for up to ~60s to give services time to start after reboot.
+      ansible.builtin.shell: |
+        for i in $(seq 1 12); do
+          ss -Hltn "sport = :{{ item }}" | grep -q . && exit 0
+          sleep 5
+        done
+        exit 1
+      loop: "{{ sanity_ports }}"
+      register: port_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Re-check whether a reboot is still required
+      ansible.builtin.include_tasks: tasks/check_reboot_required.yml
+
+    - name: Evaluate sanity results
+      vars:
+        running_now: "{{ ansible_facts.services | dict2items | selectattr('value.state', 'equalto', 'running') | map(attribute='key') | list }}"
+        running_before: >-
+          {{ (services_before_file.content | b64decode).splitlines() | select | list
+             if services_before_file.content is defined else [] }}
+        critical_units: "{{ critical_services | map('regex_replace', '\\.service$', '') | map('regex_replace', '$', '.service') | list }}"
+      ansible.builtin.set_fact:
+        services_snapshot_found: "{{ services_before_file.content is defined }}"
+        services_missing: >-
+          {{ running_before | difference(running_now)
+             | reject('search', services_ignore_missing | join('|') if services_ignore_missing else '^$')
+             | sort }}
+        services_new: "{{ running_now | difference(running_before) | sort if services_before_file.content is defined else [] }}"
+        critical_down: "{{ critical_units | difference(running_now) }}"
+        ports_down: "{{ port_checks.results | default([]) | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+
+    - name: Set sanity status
+      ansible.builtin.set_fact:
+        sanity_issues: >-
+          {{ (['Critical service(s) not running: ' ~ critical_down | join(', ')] if critical_down else [])
+             + (['Port(s) not listening: ' ~ ports_down | join(', ')] if ports_down else [])
+             + (['Service(s) running before patching are now stopped: ' ~ services_missing | join(', ')]
+                if services_missing and fail_on_missing_services | bool else []) }}
+
+    - name: Write post-patch report
+      ansible.builtin.template:
+        src: templates/postpatch_report.j2
+        dest: "{{ postpatch_log }}"
+        mode: "0640"
+
+    - name: Post-patch sanity result
+      ansible.builtin.assert:
+        that: sanity_issues | length == 0
+        fail_msg: "Sanity check FAILED: {{ sanity_issues | join('; ') }}. See {{ postpatch_log }}"
+        success_msg: >-
+          Sanity check PASSED (rebooted: {{ reboot_result is changed }},
+          kernel: {{ ansible_facts.kernel }}). See {{ postpatch_log }}

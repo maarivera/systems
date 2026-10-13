@@ -1,0 +1,117 @@
+---
+# Phase 2: Pre-patch health check.
+# Checks free disk space, machine status, running applications and CPU.
+# Report: <log_dir>/prepatch_check_<YYYYMMDD>.log
+# A host that fails the disk space check is failed here and, when run via
+# site.yml, is NOT patched.
+- name: "Phase 2 | Pre-patch health check"
+  hosts: patch_targets
+  become: true
+  gather_facts: true
+
+  vars:
+    prepatch_log: "{{ log_dir }}/prepatch_check_{{ log_date }}.log"
+    prepatch_commands:
+      - name: Machine status (uptime / load average)
+        cmd: uptime
+      - name: Last boot
+        cmd: who -b
+      - name: Free disk space
+        cmd: df -hPT -x tmpfs -x devtmpfs -x squashfs -x overlay
+      - name: Free inodes
+        cmd: df -iP -x tmpfs -x devtmpfs -x squashfs -x overlay
+      - name: Memory
+        cmd: free -h
+      - name: CPU information
+        cmd: lscpu | grep -E '^(Architecture|CPU\(s\)|Model name|Thread|Core|Socket|NUMA node\(s\))'
+      - name: CPU utilisation
+        cmd: top -bn1 | head -n 5
+      - name: Top 15 processes by CPU
+        cmd: ps -eo pid,user,%cpu,%mem,etime,comm --sort=-%cpu | head -n 16
+      - name: Top 15 processes by memory
+        cmd: ps -eo pid,user,%cpu,%mem,etime,comm --sort=-%mem | head -n 16
+      - name: Running services (applications)
+        cmd: systemctl list-units --type=service --state=running --no-legend --no-pager --plain
+      - name: Listening ports (applications)
+        cmd: ss -tulpn
+
+  tasks:
+    - name: Verify OS family is supported
+      ansible.builtin.assert:
+        that: ansible_facts.os_family in ['RedHat', 'Debian']
+        fail_msg: "Unsupported OS family: {{ ansible_facts.os_family }}"
+        quiet: true
+
+    - name: Run pre-patch checks
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop: "{{ prepatch_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: prepatch_out
+      changed_when: false
+      failed_when: false
+
+    - name: List failed systemd units
+      ansible.builtin.command: systemctl --failed --no-legend --no-pager --plain
+      register: failed_units
+      changed_when: false
+      failed_when: false
+
+    - name: Gather service state
+      ansible.builtin.service_facts:
+
+    - name: Get free space (MB) per mount point
+      ansible.builtin.command: df -m --output=target,avail
+      register: df_free
+      changed_when: false
+      # df exits 1 if any mount is unreadable (e.g. stale NFS) but still lists the rest.
+      failed_when: df_free.stdout_lines | length < 2
+
+    - name: Initialise disk check
+      ansible.builtin.set_fact:
+        disk_checked: []
+        disk_issues: []
+        running_services: "{{ ansible_facts.services | dict2items | selectattr('value.state', 'equalto', 'running') | map(attribute='key') | sort }}"
+
+    - name: Check free disk space against thresholds
+      vars:
+        mount: "{{ item.split()[0] }}"
+        free_mb: "{{ item.split()[1] | int }}"
+        line: "{{ '%-12s %8d MB free  (minimum %d MB)' | format(mount, free_mb | int, min_free_mb[mount] | int) }}"
+      ansible.builtin.set_fact:
+        disk_checked: "{{ disk_checked + [line] }}"
+        disk_issues: "{{ disk_issues + ([line] if (free_mb | int) < (min_free_mb[mount] | int) else []) }}"
+      loop: "{{ df_free.stdout_lines[1:] }}"
+      loop_control:
+        label: "{{ mount }}"
+      when: item.split()[0] in min_free_mb
+
+    - name: Set pre-patch status
+      ansible.builtin.set_fact:
+        prepatch_status: "{{ 'PASS' if disk_issues | length == 0 else 'FAIL' }}"
+
+    - name: Create state directory
+      ansible.builtin.file:
+        path: "{{ state_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Save running services snapshot for post-patch comparison
+      ansible.builtin.copy:
+        content: "{{ running_services | join('\n') }}\n"
+        dest: "{{ state_dir }}/services_before.txt"
+        mode: "0640"
+
+    - name: Write pre-patch report
+      ansible.builtin.template:
+        src: templates/prepatch_report.j2
+        dest: "{{ prepatch_log }}"
+        mode: "0640"
+
+    - name: Pre-patch result
+      ansible.builtin.assert:
+        that: prepatch_status == 'PASS'
+        fail_msg: "Pre-patch FAILED: {{ disk_issues | join('; ') }}. See {{ prepatch_log }}"
+        success_msg: >-
+          Pre-patch PASSED ({{ running_services | length }} running services,
+          {{ failed_units.stdout_lines | length }} failed units). See {{ prepatch_log }}
