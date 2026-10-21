@@ -4,6 +4,8 @@ A web UI for the automations in this repository. Store each playbook, Terraform 
 
 The hub is a single Python server (`server.py`) with a SQLite database. It uses the standard library only, so there is nothing to `pip install`.
 
+![Automation Hub overview](screenshots/overview.png)
+
 ## Requirements
 
 - **Python 3.9 or newer** (`python3 --version`).
@@ -60,6 +62,8 @@ The catalog comes pre-filled with this repository's projects (`patching/`, `pack
 
 Secrets and state are never imported: `terraform.tfvars`, `*.auto.tfvars`, `*.tfstate`, `.env` and `crash.log` are skipped, as are `.terraform/`, `.git/` and `reports/` folders. Run **Sync all from repo** again whenever you change files in the repository.
 
+![Catalog after syncing from the repository](screenshots/catalog.png)
+
 To get full Terraform validation, initialise each module once:
 
 ```bash
@@ -93,6 +97,8 @@ On the **Inventories** page, upload the hosts your workflows target: an Ansible 
    ```bash
    bash workflow.sh
    ```
+
+![Workflow visualizer](screenshots/designer.png)
 
 ## Data and backups
 
