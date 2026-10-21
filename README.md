@@ -11,6 +11,7 @@ Each folder is a self-contained Ansible project for a real operational task. Clo
 | [`patching/`](patching/) | End-to-end OS patching: vulnerability check → pre-patch health gate → patch → reboot prompt → post-patch sanity check. Each phase writes a report on every server. | RHEL family (dnf), Debian / Ubuntu (apt) |
 | [`offboarding/`](offboarding/) | Event-Driven Ansible user offboarding: an HR termination webhook triggers removal of access from SSO, Entra ID, email, Teams, Azure and AWS. Dry run by default; writes a report per user. | Okta, Entra ID, Exchange Online, Teams, Azure RBAC, AWS IAM / Identity Center |
 | [`packages/`](packages/) | Install packages read from a list file (`files/packages.txt` by default, overridable per group or per run). Writes a report of what was installed. | RHEL family (dnf), Debian / Ubuntu (apt) |
+| [`automation-hub/`](automation-hub/) | Web UI to catalog these automations, chain them into workflows with approval steps, simulate runs and export them as bash runners. Python 3.9+ only. See its README for setup. | Runs on the control node |
 
 See each project's own README for full details and configuration.
 
