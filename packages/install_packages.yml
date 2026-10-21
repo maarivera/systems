@@ -1,0 +1,89 @@
+---
+# Install packages listed in a file.
+# The list is read on the control node from packages_file (see group_vars).
+# Report: <log_dir>/package_install_<YYYYMMDD>.log
+- name: "Install packages from list file"
+  hosts: package_targets
+  become: true
+  gather_facts: true
+
+  vars:
+    package_log: "{{ log_dir }}/package_install_{{ log_date }}.log"
+    packages: "{{ lookup('ansible.builtin.file', packages_file).splitlines()
+                  | map('regex_replace', '#.*$', '') | map('trim') | select | unique | list }}"
+    pkg_query_cmd:
+      RedHat: rpm -qa --qf '%{NAME}.%{ARCH} %{VERSION}-%{RELEASE}\n'
+      Debian: dpkg-query -W -f='${Package}:${Architecture} ${Version}\n'
+
+  tasks:
+    - name: Verify OS family is supported
+      ansible.builtin.assert:
+        that: ansible_facts.os_family in ['RedHat', 'Debian']
+        fail_msg: "Unsupported OS family: {{ ansible_facts.os_family }}"
+        quiet: true
+
+    - name: Verify package list is not empty
+      ansible.builtin.assert:
+        that: packages | length > 0
+        fail_msg: "No packages listed in {{ packages_file }}"
+        quiet: true
+
+    - name: Record installed packages before install
+      ansible.builtin.command: "{{ pkg_query_cmd[ansible_facts.os_family] }}"
+      register: pkgs_before
+      changed_when: false
+      check_mode: false
+
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Install packages
+      ansible.builtin.package:
+        name: "{{ packages }}"
+        state: "{{ package_state }}"
+      environment:
+        # Ubuntu needrestart: list only, don't auto-restart services.
+        NEEDRESTART_MODE: l
+
+    - name: Record installed packages after install
+      ansible.builtin.command: "{{ pkg_query_cmd[ansible_facts.os_family] }}"
+      register: pkgs_after
+      changed_when: false
+      check_mode: false
+
+    - name: Determine installed or upgraded packages
+      ansible.builtin.set_fact:
+        packages_changed: "{{ pkgs_after.stdout_lines | difference(pkgs_before.stdout_lines) | sort }}"
+
+    - name: Write package install report
+      ansible.builtin.copy:
+        content: |
+          Package install report - {{ inventory_hostname }}
+          Date:         {{ ansible_facts.date_time.iso8601 }}
+          OS:           {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+          Package file: {{ packages_file }}
+          State:        {{ package_state }}
+
+          Requested ({{ packages | length }}):
+          {% for p in packages %}
+            {{ p }}
+          {% endfor %}
+
+          Installed / upgraded ({{ packages_changed | length }}, including dependencies):
+          {% for p in packages_changed %}
+            {{ p }}
+          {% else %}
+            none - everything was already in the requested state
+          {% endfor %}
+        dest: "{{ package_log }}"
+        mode: "0640"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ packages | length }} package(s) requested,
+          {{ packages_changed | length }} installed/upgraded (including dependencies).
+          Report: {{ package_log }}

@@ -1,0 +1,9 @@
+{
+  "event_type": "employee.terminated",
+  "reference": "HR-2026-0412",
+  "effective_date": "2026-10-12",
+  "employee": {
+    "upn": "jane.doe@example.com",
+    "employee_id": "E10234"
+  }
+}

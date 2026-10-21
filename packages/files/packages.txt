@@ -1,0 +1,8 @@
+# Packages to install on target servers, one per line.
+# Blank lines and anything after '#' are ignored.
+# Names must exist in the target OS's repositories (dnf or apt).
+curl
+vim
+git
+htop
+tmux

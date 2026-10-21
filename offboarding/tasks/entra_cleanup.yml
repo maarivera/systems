@@ -1,0 +1,84 @@
+---
+# Runs after Teams so ownership is handed over before group memberships go.
+- name: Entra ID | List group memberships
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes,mailEnabled,securityEnabled,onPremisesSyncEnabled&$top=999"
+    headers: "{{ graph_headers }}"
+  register: entra_groups
+  when: entra_remove_groups
+
+- name: Entra ID | List directory roles
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/memberOf/microsoft.graph.directoryRole?$select=id,displayName"
+    headers: "{{ graph_headers }}"
+  register: entra_roles
+  when: entra_remove_directory_roles
+
+- name: Entra ID | List licences
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}?$select=licenseAssignmentStates"
+    headers: "{{ graph_headers }}"
+  register: entra_licenses
+  when: entra_remove_licenses
+
+- name: Entra ID | Sort out what can be changed
+  vars:
+    all_groups: "{{ entra_groups.json.value | default([]) }}"
+    # Graph can only change membership of cloud-only, assigned M365 and security groups.
+    unmanageable: >-
+      {{ all_groups | selectattr('onPremisesSyncEnabled', 'equalto', true) | list
+         + all_groups | selectattr('groupTypes', 'contains', 'DynamicMembership') | list
+         + all_groups | rejectattr('groupTypes', 'contains', 'Unified') | selectattr('mailEnabled') | list }}
+  ansible.builtin.set_fact:
+    groups_to_remove: "{{ all_groups | reject('in', unmanageable) | list }}"
+    groups_skipped: "{{ unmanageable | unique(attribute='id') }}"
+    roles_to_remove: "{{ entra_roles.json.value | default([]) }}"
+    direct_skus: >-
+      {{ entra_licenses.json.licenseAssignmentStates | default([])
+         | selectattr('assignedByGroup', 'none') | map(attribute='skuId') | unique | list }}
+
+- name: Entra ID | Remove from groups
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/groups/{{ item.id }}/members/{{ entra_user.id }}/$ref"
+    method: DELETE
+    headers: "{{ graph_headers }}"
+    status_code: [204, 404]
+  loop: "{{ groups_to_remove }}"
+  loop_control:
+    label: "{{ item.displayName }}"
+  when: not offboard_dry_run | bool
+  changed_when: true
+
+- name: Entra ID | Remove directory roles
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/directoryRoles/{{ item.id }}/members/{{ entra_user.id }}/$ref"
+    method: DELETE
+    headers: "{{ graph_headers }}"
+    status_code: [204, 404]
+  loop: "{{ roles_to_remove }}"
+  loop_control:
+    label: "{{ item.displayName }}"
+  when: not offboard_dry_run | bool
+  changed_when: true
+
+- name: Entra ID | Remove direct licences
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/assignLicense"
+    method: POST
+    headers: "{{ graph_headers }}"
+    body_format: json
+    body:
+      addLicenses: []
+      removeLicenses: "{{ direct_skus }}"
+    status_code: [200]
+  when: direct_skus | length > 0 and not offboard_dry_run | bool
+  changed_when: true
+
+- name: Entra ID | Record result
+  ansible.builtin.set_fact:
+    offboard_log: >-
+      {{ offboard_log
+         + (groups_to_remove | map(attribute='displayName') | map('regex_replace', '^', '[Entra ID] ' ~ act ~ '  remove from group ') | list)
+         + (groups_skipped | map(attribute='displayName') | map('regex_replace', '^', '[Entra ID] WARN  not removed (dynamic, on-prem synced or distribution list): ') | list)
+         + (roles_to_remove | map(attribute='displayName') | map('regex_replace', '^', '[Entra ID] ' ~ act ~ '  remove directory role ') | list)
+         + (direct_skus | map('regex_replace', '^', '[Entra ID] ' ~ act ~ '  remove licence SKU ') | list) }}

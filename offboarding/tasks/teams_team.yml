@@ -1,0 +1,78 @@
+---
+# One team (loop var: team).
+- name: "Teams {{ team.displayName }} | List members"
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/teams/{{ team.id }}/members"
+    headers: "{{ graph_headers }}"
+  register: team_members
+
+- name: "Teams {{ team.displayName }} | Work out ownership"
+  vars:
+    members: "{{ team_members.json.value }}"
+    me: "{{ members | selectattr('userId', 'equalto', entra_user.id) | first | default({}) }}"
+    other_owners: "{{ members | rejectattr('userId', 'equalto', entra_user.id) | selectattr('roles', 'contains', 'owner') | list }}"
+  ansible.builtin.set_fact:
+    team_me: "{{ me }}"
+    team_sole_owner: "{{ 'owner' in me.roles | default([]) and other_owners | length == 0 }}"
+    team_successor_membership: >-
+      {{ members | selectattr('userId', 'equalto', teams_new_owner.id | default('')) | first | default({}) }}
+    team_can_hand_over: "{{ teams_transfer_ownership and teams_new_owner is defined }}"
+
+- name: "Teams {{ team.displayName }} | Promote existing member to owner"
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/teams/{{ team.id }}/members/{{ team_successor_membership.id }}"
+    method: PATCH
+    headers: "{{ graph_headers }}"
+    body_format: json
+    body:
+      "@odata.type": "#microsoft.graph.aadUserConversationMember"
+      roles: [owner]
+    status_code: [200]
+  when:
+    - team_sole_owner | bool
+    - team_can_hand_over | bool
+    - team_successor_membership | length > 0
+    - not offboard_dry_run | bool
+  changed_when: true
+
+- name: "Teams {{ team.displayName }} | Add successor as owner"
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/teams/{{ team.id }}/members"
+    method: POST
+    headers: "{{ graph_headers }}"
+    body_format: json
+    body:
+      "@odata.type": "#microsoft.graph.aadUserConversationMember"
+      roles: [owner]
+      "user@odata.bind": "{{ graph_url }}/users('{{ teams_new_owner.id }}')"
+    status_code: [201]
+  when:
+    - team_sole_owner | bool
+    - team_can_hand_over | bool
+    - team_successor_membership | length == 0
+    - not offboard_dry_run | bool
+  changed_when: true
+
+- name: "Teams {{ team.displayName }} | Remove user"
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/teams/{{ team.id }}/members/{{ team_me.id }}"
+    method: DELETE
+    headers: "{{ graph_headers }}"
+    status_code: [204]
+  when:
+    - teams_remove_membership
+    - team_me | length > 0
+    - not team_sole_owner | bool or team_can_hand_over | bool
+    - not offboard_dry_run | bool
+  changed_when: true
+
+- name: "Teams {{ team.displayName }} | Record result"
+  ansible.builtin.set_fact:
+    offboard_log: >-
+      {{ offboard_log
+         + ((['[Teams] ' ~ act ~ '  ' ~ team.displayName ~ ': make ' ~ teams_new_owner.userPrincipalName ~ ' owner (user was sole owner)']
+              if team_can_hand_over | bool else
+              ['[Teams] WARN  ' ~ team.displayName ~ ': user is sole owner and there is no successor; left in place'])
+            if team_sole_owner | bool else [])
+         + (['[Teams] ' ~ act ~ '  ' ~ team.displayName ~ ': remove user']
+            if teams_remove_membership and (not team_sole_owner | bool or team_can_hand_over | bool) else []) }}

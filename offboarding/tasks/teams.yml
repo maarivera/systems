@@ -1,0 +1,19 @@
+---
+# Make sure no team is left without an owner, then remove the user.
+- name: Teams | List joined teams
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/joinedTeams?$select=id,displayName"
+    headers: "{{ graph_headers }}"
+  register: joined_teams
+
+- name: Teams | Record no teams
+  ansible.builtin.set_fact:
+    offboard_log: "{{ offboard_log + ['[Teams] INFO  user is not in any team'] }}"
+  when: joined_teams.json.value | length == 0
+
+- name: Teams | Hand over and remove each team
+  ansible.builtin.include_tasks: teams_team.yml
+  loop: "{{ joined_teams.json.value }}"
+  loop_control:
+    loop_var: team
+    label: "{{ team.displayName }}"

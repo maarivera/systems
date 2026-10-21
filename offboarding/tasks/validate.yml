@@ -1,0 +1,34 @@
+---
+# Refuse anything that doesn't look like a real, unprotected user, then set up
+# the facts the rest of the run appends to.
+- name: Check the UPN looks like an email address
+  ansible.builtin.assert:
+    that: offboard_upn is match('^[^@\s]+@[^@\s]+\.[^@\s]+$')
+    fail_msg: "offboard_upn '{{ offboard_upn }}' is not a valid UPN. Pass -e offboard_upn=user@example.com"
+    quiet: true
+
+- name: Check the user is not protected
+  ansible.builtin.assert:
+    that: offboard_upn | lower not in (protected_accounts | map('lower') | list)
+    fail_msg: "{{ offboard_upn }} is in protected_accounts and will not be offboarded automatically."
+    quiet: true
+
+- name: Check at least one system is enabled
+  ansible.builtin.assert:
+    that: offboard_systems.values() | select | list | length > 0
+    fail_msg: "All systems are disabled in offboard_systems."
+    quiet: true
+
+- name: Initialise run state
+  ansible.builtin.set_fact:
+    offboard_run_id: "{{ now(utc=true).strftime('%Y%m%dT%H%M%SZ') }}"
+    offboard_started: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+    offboard_log: []
+    offboard_errors: []
+    offboard_found: {}
+
+- name: Show mode
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'DRY RUN: nothing will be changed' if offboard_dry_run | bool else 'LIVE RUN: changes will be made' }}
+      for {{ offboard_upn }}

@@ -1,0 +1,5 @@
+---
+# Needed only by ansible-rulebook (the EDA webhook source).
+# The playbook itself uses ansible.builtin modules and the AWS CLI.
+collections:
+  - name: ansible.eda

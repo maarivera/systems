@@ -1,0 +1,127 @@
+---
+# ---------------------------------------------------------------------------
+# Who to offboard
+# ---------------------------------------------------------------------------
+# Set by the EDA rulebook from the HR event, or on the command line:
+#   ansible-playbook site.yml -e offboard_upn=jane.doe@example.com
+offboard_upn: ""
+# HR / change reference, written to the report.
+offboard_ticket: ""
+# Who or what asked for the offboarding, written to the report.
+offboard_requested_by: manual
+
+# true  = look the user up everywhere and report what WOULD change (no changes)
+# false = make the changes
+# Leave this true until a dry run against a test user looks right.
+offboard_dry_run: true
+
+# Accounts that must never be offboarded automatically (break-glass admins,
+# service accounts). Compared case-insensitively against offboard_upn.
+protected_accounts:
+  - breakglass@example.com
+
+# ---------------------------------------------------------------------------
+# Systems
+# ---------------------------------------------------------------------------
+offboard_systems:
+  okta: true          # SSO
+  entra_id: true      # Azure AD account, sessions, groups, roles, licences
+  email: true         # Exchange Online auto-reply / forwarding
+  teams: true         # Teams ownership hand-over and membership
+  azure_rbac: true    # Azure subscription role assignments
+  aws: true           # IAM users and IAM Identity Center
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+# One report per run on the control node:
+#   <report_dir>/offboarding_<user>_<YYYYMMDDTHHMMSSZ>.log
+report_dir: "{{ playbook_dir }}/reports"
+
+# ---------------------------------------------------------------------------
+# Microsoft (Entra ID, Exchange Online, Teams, Azure)
+# ---------------------------------------------------------------------------
+# App registration using client credentials. Required application permissions
+# are listed in README.md. Secrets come from the environment, never this file.
+ms_tenant_id: "{{ lookup('ansible.builtin.env', 'AZURE_TENANT_ID') }}"
+ms_client_id: "{{ lookup('ansible.builtin.env', 'AZURE_CLIENT_ID') }}"
+ms_client_secret: "{{ lookup('ansible.builtin.env', 'AZURE_CLIENT_SECRET') }}"
+ms_login_url: https://login.microsoftonline.com
+graph_url: https://graph.microsoft.com/v1.0
+arm_url: https://management.azure.com
+
+# Remove the user from cloud-only, assigned-membership groups. Dynamic groups,
+# on-prem synced groups and distribution lists are reported, not changed.
+entra_remove_groups: true
+# Remove the user from Entra directory roles (Global Admin etc.).
+entra_remove_directory_roles: true
+# Remove directly assigned licences. Off by default: removing the Exchange
+# licence starts the 30-day mailbox deletion clock and stops the auto-reply.
+entra_remove_licenses: false
+
+# ---------------------------------------------------------------------------
+# Email (Exchange Online via Microsoft Graph)
+# ---------------------------------------------------------------------------
+email_auto_reply: true
+email_auto_reply_internal: >-
+  {{ entra_user.displayName | default('This person') }} is no longer with the company.
+  Please contact {{ entra_manager.displayName | default('their manager') }}
+  {{ ('(' ~ entra_manager.mail ~ ')') if entra_manager.mail | default('') else '' }} instead.
+email_auto_reply_external: >-
+  {{ entra_user.displayName | default('This person') }} is no longer with the company.
+  Please contact {{ entra_manager.mail | default('our main office') }} instead.
+
+# Forward new mail with an inbox rule. Check your legal / privacy policy first.
+email_forward: false
+# Forward target. Empty = the user's manager.
+email_forward_to: ""
+
+# ---------------------------------------------------------------------------
+# Teams
+# ---------------------------------------------------------------------------
+# When the user is the ONLY owner of a team, promote their manager to owner
+# before removing them, so the team is not left ownerless.
+teams_transfer_ownership: true
+# UPN used as the new owner when the user has no manager in Entra ID.
+teams_fallback_owner: ""
+# Remove the user from every team they belong to. A sole-owned team with no
+# successor is left alone and reported as a warning.
+teams_remove_membership: true
+
+# ---------------------------------------------------------------------------
+# Azure RBAC
+# ---------------------------------------------------------------------------
+# Subscription IDs to scan for role assignments held directly by the user.
+azure_subscriptions: []
+#  - 00000000-0000-0000-0000-000000000000
+
+# ---------------------------------------------------------------------------
+# Okta (SSO)
+# ---------------------------------------------------------------------------
+okta_org_url: "{{ lookup('ansible.builtin.env', 'OKTA_ORG_URL') }}"     # https://example.okta.com
+okta_api_token: "{{ lookup('ansible.builtin.env', 'OKTA_API_TOKEN') }}"
+okta_login: "{{ offboard_upn }}"
+# deactivate = Okta's standard offboarding (unassigns apps, can deprovision downstream)
+# suspend    = blocks sign-in but keeps app assignments; reversible
+okta_action: deactivate
+
+# ---------------------------------------------------------------------------
+# AWS (uses the AWS CLI on the control node)
+# ---------------------------------------------------------------------------
+# One entry per account, each with a named CLI profile that can manage IAM.
+aws_accounts: []
+#  - name: production
+#    profile: prod-admin
+#  - name: staging
+#    profile: staging-admin
+aws_iam_username: "{{ offboard_upn.split('@')[0] }}"
+
+# IAM Identity Center. Leave identity_store_id empty to skip.
+# Only use this when Identity Center is its own identity source. If it is fed
+# by SCIM from Okta or Entra ID, offboarding there already removes access.
+aws_identity_center:
+  profile: ""
+  region: us-east-1
+  identity_store_id: ""   # d-xxxxxxxxxx
+  instance_arn: ""        # arn:aws:sso:::instance/ssoins-xxxxxxxxxxxxxxxx
+  username: "{{ offboard_upn }}"

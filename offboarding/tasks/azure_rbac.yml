@@ -1,0 +1,41 @@
+---
+# Remove Azure role assignments held directly by the user (at, above or below
+# each subscription). Group-inherited access goes when Entra groups are removed.
+- name: Azure | Record nothing configured
+  ansible.builtin.set_fact:
+    offboard_log: "{{ offboard_log + ['[Azure RBAC] INFO  no azure_subscriptions configured'] }}"
+  when: azure_subscriptions | length == 0
+
+- name: Azure | Remove role assignments
+  when: azure_subscriptions | length > 0
+  block:
+    - name: Azure | List role assignments
+      ansible.builtin.uri:
+        url: >-
+          {{ arm_url }}/subscriptions/{{ item }}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter={{ ("principalId eq '" ~ entra_user.id ~ "'") | urlencode }}
+        headers: "{{ arm_headers }}"
+      loop: "{{ azure_subscriptions }}"
+      register: rbac_lists
+
+    - name: Azure | Collect assignments
+      ansible.builtin.set_fact:
+        rbac_assignments: "{{ rbac_lists.results | map(attribute='json.value') | flatten | unique(attribute='id') }}"
+
+    - name: Azure | Delete role assignments
+      ansible.builtin.uri:
+        url: "{{ arm_url }}{{ item.id }}?api-version=2022-04-01"
+        method: DELETE
+        headers: "{{ arm_headers }}"
+        status_code: [200, 204]
+      loop: "{{ rbac_assignments }}"
+      loop_control:
+        label: "{{ item.properties.scope }}"
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: Azure | Record result
+      ansible.builtin.set_fact:
+        offboard_log: >-
+          {{ offboard_log
+             + (rbac_assignments | map(attribute='properties.scope') | map('regex_replace', '^', '[Azure RBAC] ' ~ act ~ '  remove role assignment at ') | list)
+             + ([] if rbac_assignments else ['[Azure RBAC] INFO  no direct role assignments in ' ~ azure_subscriptions | length ~ ' subscription(s)']) }}

@@ -1,0 +1,36 @@
+==========================================================================
+ USER OFFBOARDING
+==========================================================================
+ User       : {{ offboard_upn }}
+{% if entra_user is defined %}
+ Name       : {{ entra_user.displayName }}
+ Manager    : {{ entra_manager.userPrincipalName | default('none') }}
+{% endif %}
+ Ticket     : {{ offboard_ticket | default('', true) or 'n/a' }}
+ Requested  : {{ offboard_requested_by }}
+ Mode       : {{ 'DRY RUN (nothing changed)' if offboard_dry_run | bool else 'LIVE' }}
+ Started    : {{ offboard_started }}
+ Finished   : {{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}
+ STATUS     : {{ offboard_status }}
+==========================================================================
+
+--- FOUND IN -------------------------------------------------------------
+{% for system, found in offboard_found.items() %}
+{{ '%-24s %s' | format(system, 'yes' if found else 'no') }}
+{% else %}
+No enabled system was checked.
+{% endfor %}
+
+--- ACTIONS --------------------------------------------------------------
+{% for line in offboard_log %}
+{{ line }}
+{% else %}
+None
+{% endfor %}
+
+--- ERRORS ---------------------------------------------------------------
+{% for line in offboard_errors %}
+{{ line }}
+{% else %}
+None
+{% endfor %}

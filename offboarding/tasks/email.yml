@@ -1,0 +1,77 @@
+---
+# Exchange Online via Microsoft Graph: auto-reply and optional forwarding.
+# Converting to a shared mailbox or granting delegate access needs Exchange
+# Online PowerShell and is not done here (see README).
+- name: Email | Check mailbox
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/mailboxSettings"
+    headers: "{{ graph_headers }}"
+    status_code: [200, 404]
+  register: mailbox
+
+- name: Email | Record no mailbox
+  ansible.builtin.set_fact:
+    offboard_log: "{{ offboard_log + ['[Email] INFO  user has no Exchange Online mailbox'] }}"
+  when: mailbox.status == 404
+
+- name: Email | Hand over mailbox
+  when: mailbox.status == 200
+  vars:
+    forward_to: "{{ email_forward_to if email_forward_to | length > 0 else entra_manager.mail | default('') }}"
+    forward_rule_name: Offboarding forward
+  block:
+    - name: Email | Set automatic replies
+      ansible.builtin.uri:
+        url: "{{ graph_url }}/users/{{ entra_user.id }}/mailboxSettings"
+        method: PATCH
+        headers: "{{ graph_headers }}"
+        body_format: json
+        body:
+          automaticRepliesSetting:
+            status: alwaysEnabled
+            externalAudience: all
+            internalReplyMessage: "{{ email_auto_reply_internal }}"
+            externalReplyMessage: "{{ email_auto_reply_external }}"
+        status_code: [200]
+      when: email_auto_reply and not offboard_dry_run | bool
+      changed_when: true
+
+    - name: Email | List inbox rules
+      ansible.builtin.uri:
+        url: "{{ graph_url }}/users/{{ entra_user.id }}/mailFolders/inbox/messageRules"
+        headers: "{{ graph_headers }}"
+      register: inbox_rules
+      when: email_forward
+
+    - name: Email | Add forwarding rule
+      ansible.builtin.uri:
+        url: "{{ graph_url }}/users/{{ entra_user.id }}/mailFolders/inbox/messageRules"
+        method: POST
+        headers: "{{ graph_headers }}"
+        body_format: json
+        body:
+          displayName: "{{ forward_rule_name }}"
+          sequence: 1
+          isEnabled: true
+          actions:
+            forwardTo:
+              - emailAddress:
+                  address: "{{ forward_to }}"
+            stopProcessingRules: false
+        status_code: [201]
+      when:
+        - email_forward
+        - forward_to | length > 0
+        - forward_rule_name not in (inbox_rules.json.value | map(attribute='displayName') | list)
+        - not offboard_dry_run | bool
+      changed_when: true
+
+    - name: Email | Record result
+      ansible.builtin.set_fact:
+        offboard_log: >-
+          {{ offboard_log
+             + (['[Email] ' ~ act ~ '  enable automatic replies'] if email_auto_reply else [])
+             + (([('[Email] ' ~ act ~ '  forward new mail to ' ~ forward_to) if forward_to | length > 0
+                  else '[Email] WARN  forwarding enabled but no manager or email_forward_to'])
+                if email_forward else [])
+             + (['[Email] WARN  removing licences will delete this mailbox after 30 days'] if entra_remove_licenses else []) }}

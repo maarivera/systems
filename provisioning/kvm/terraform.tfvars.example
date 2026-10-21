@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars and edit.
+
+libvirt_uri  = "qemu:///system" # or "qemu+ssh://root@kvm01.example.com/system"
+storage_pool = "default"
+
+# Any qcow2 cloud image works, for example:
+#   https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+#   https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2
+base_image = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+
+vm_name = "app01"
+domain  = "example.com"
+
+# Sizing
+cpu          = 4
+memory_mb    = 8192
+disk_size_gb = 40
+
+# Networking: 2 NICs, one per libvirt network
+nic_count = 2
+networks  = ["default", "backup-net"]
+
+# Static IP on NIC 0, DHCP on NIC 1. Omit entirely for DHCP everywhere.
+ipv4_addresses = ["192.168.122.21", ""]
+ipv4_netmask   = 24
+ipv4_gateway   = "192.168.122.1"
+dns_servers    = ["192.168.122.1"]
+
+ssh_user        = "admin"
+ssh_public_keys = ["ssh-ed25519 AAAA... you@laptop"]

@@ -1,0 +1,68 @@
+---
+# Clear sessions and OAuth tokens, then deactivate (or suspend) the Okta user.
+- name: Okta | Check settings
+  ansible.builtin.assert:
+    that:
+      - okta_org_url | length > 0
+      - okta_api_token | length > 0
+      - okta_action in ['deactivate', 'suspend']
+    fail_msg: "Set OKTA_ORG_URL and OKTA_API_TOKEN, and okta_action to deactivate or suspend."
+    quiet: true
+
+- name: Okta | Set request headers
+  ansible.builtin.set_fact:
+    okta_headers:
+      Authorization: "SSWS {{ okta_api_token }}"
+      Accept: application/json
+  no_log: true
+
+- name: Okta | Look up user
+  ansible.builtin.uri:
+    url: "{{ okta_org_url }}/api/v1/users/{{ okta_login | urlencode }}"
+    headers: "{{ okta_headers }}"
+    status_code: [200, 404]
+  register: okta_user
+
+- name: Okta | Record user not found
+  ansible.builtin.set_fact:
+    offboard_found: "{{ offboard_found | combine({'okta': false}) }}"
+    offboard_log: "{{ offboard_log + ['[Okta] INFO  user ' ~ okta_login ~ ' not found'] }}"
+  when: okta_user.status == 404
+
+- name: Okta | Offboard user
+  when: okta_user.status == 200
+  vars:
+    okta_id: "{{ okta_user.json.id }}"
+    okta_status: "{{ okta_user.json.status }}"
+    okta_needs_change: >-
+      {{ okta_status != 'DEPROVISIONED' if okta_action == 'deactivate'
+         else okta_status not in ['SUSPENDED', 'DEPROVISIONED'] }}
+  block:
+    - name: Okta | Clear sessions and revoke OAuth tokens
+      ansible.builtin.uri:
+        url: "{{ okta_org_url }}/api/v1/users/{{ okta_id }}/sessions?oauthTokens=true"
+        method: DELETE
+        headers: "{{ okta_headers }}"
+        status_code: [204]
+      when: not offboard_dry_run | bool and okta_status != 'DEPROVISIONED'
+      changed_when: true
+
+    - name: "Okta | {{ okta_action | capitalize }} user"
+      ansible.builtin.uri:
+        url: "{{ okta_org_url }}/api/v1/users/{{ okta_id }}/lifecycle/{{ okta_action }}{{ '?sendEmail=false' if okta_action == 'deactivate' else '' }}"
+        method: POST
+        headers: "{{ okta_headers }}"
+        status_code: [200]
+      when: not offboard_dry_run | bool and okta_needs_change | bool
+      changed_when: true
+
+    - name: Okta | Record result
+      ansible.builtin.set_fact:
+        offboard_found: "{{ offboard_found | combine({'okta': true}) }}"
+        offboard_log: >-
+          {{ offboard_log + (
+               ['[Okta] ' ~ act ~ '  clear sessions and OAuth tokens',
+                '[Okta] ' ~ act ~ '  ' ~ okta_action ~ ' user ' ~ okta_login ~ ' (was ' ~ okta_status ~ ')']
+               if okta_needs_change | bool else
+               ['[Okta] SKIP  user ' ~ okta_login ~ ' already ' ~ okta_status]
+             ) }}

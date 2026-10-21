@@ -1,0 +1,31 @@
+---
+# Block sign-in and invalidate refresh tokens / session cookies.
+- name: Entra ID | Block sign-in
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}"
+    method: PATCH
+    headers: "{{ graph_headers }}"
+    body_format: json
+    body:
+      accountEnabled: false
+    status_code: [204]
+  when: not offboard_dry_run | bool and entra_user.accountEnabled
+  changed_when: true
+
+- name: Entra ID | Revoke sign-in sessions
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ entra_user.id }}/revokeSignInSessions"
+    method: POST
+    headers: "{{ graph_headers }}"
+    status_code: [200, 204]
+  when: not offboard_dry_run | bool
+  changed_when: true
+
+- name: Entra ID | Record result
+  ansible.builtin.set_fact:
+    offboard_log: >-
+      {{ offboard_log + [
+           ('[Entra ID] ' ~ act ~ '  block sign-in') if entra_user.accountEnabled
+             else '[Entra ID] SKIP  sign-in already blocked',
+           '[Entra ID] ' ~ act ~ '  revoke sign-in sessions'
+         ] }}

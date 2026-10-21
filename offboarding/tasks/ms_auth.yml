@@ -1,0 +1,45 @@
+---
+# Client-credentials tokens for Microsoft Graph and, if needed, Azure Resource Manager.
+- name: Microsoft | Check app registration settings
+  ansible.builtin.assert:
+    that:
+      - ms_tenant_id | length > 0
+      - ms_client_id | length > 0
+      - ms_client_secret | length > 0
+    fail_msg: "Set AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET in the environment."
+    quiet: true
+
+- name: Microsoft | Get Graph token
+  ansible.builtin.uri:
+    url: "{{ ms_login_url }}/{{ ms_tenant_id }}/oauth2/v2.0/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: client_credentials
+      client_id: "{{ ms_client_id }}"
+      client_secret: "{{ ms_client_secret }}"
+      scope: https://graph.microsoft.com/.default
+  register: graph_token
+  no_log: true
+
+- name: Microsoft | Get Azure Resource Manager token
+  ansible.builtin.uri:
+    url: "{{ ms_login_url }}/{{ ms_tenant_id }}/oauth2/v2.0/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: client_credentials
+      client_id: "{{ ms_client_id }}"
+      client_secret: "{{ ms_client_secret }}"
+      scope: https://management.azure.com/.default
+  register: arm_token
+  no_log: true
+  when: offboard_systems.azure_rbac and azure_subscriptions | length > 0
+
+- name: Microsoft | Set request headers
+  ansible.builtin.set_fact:
+    graph_headers:
+      Authorization: "Bearer {{ graph_token.json.access_token }}"
+    arm_headers:
+      Authorization: "Bearer {{ arm_token.json.access_token | default('') }}"
+  no_log: true

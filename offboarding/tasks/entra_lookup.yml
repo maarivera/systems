@@ -1,0 +1,57 @@
+---
+# Sets entra_user (and entra_manager / teams_new_owner when they exist).
+# If the user is not in Entra ID, entra_user stays undefined and the
+# Entra ID, email, Teams and Azure steps are skipped.
+- name: Entra ID | Look up user
+  ansible.builtin.uri:
+    url: "{{ graph_url }}/users/{{ offboard_upn | urlencode }}?$select=id,displayName,userPrincipalName,mail,accountEnabled"
+    headers: "{{ graph_headers }}"
+    status_code: [200, 404]
+  register: entra_user_resp
+
+- name: Entra ID | Record user not found
+  ansible.builtin.set_fact:
+    offboard_found: "{{ offboard_found | combine({'entra_id': false}) }}"
+    offboard_log: "{{ offboard_log + ['[Entra ID] INFO  user not found; Entra ID, email, Teams and Azure skipped'] }}"
+  when: entra_user_resp.status == 404
+
+- name: Entra ID | Manager and successor
+  when: entra_user_resp.status == 200
+  block:
+    - name: Entra ID | Save user
+      ansible.builtin.set_fact:
+        entra_user: "{{ entra_user_resp.json }}"
+        offboard_found: "{{ offboard_found | combine({'entra_id': true}) }}"
+
+    - name: Entra ID | Look up manager
+      ansible.builtin.uri:
+        url: "{{ graph_url }}/users/{{ entra_user.id }}/manager?$select=id,displayName,userPrincipalName,mail"
+        headers: "{{ graph_headers }}"
+        status_code: [200, 404]
+      register: entra_manager_resp
+
+    - name: Entra ID | Save manager
+      ansible.builtin.set_fact:
+        entra_manager: "{{ entra_manager_resp.json }}"
+      when: entra_manager_resp.status == 200
+
+    - name: Entra ID | Look up fallback owner
+      ansible.builtin.uri:
+        url: "{{ graph_url }}/users/{{ teams_fallback_owner | urlencode }}?$select=id,displayName,userPrincipalName,mail"
+        headers: "{{ graph_headers }}"
+      register: entra_fallback_resp
+      when: entra_manager is not defined and teams_fallback_owner | length > 0
+
+    - name: Entra ID | Choose successor
+      ansible.builtin.set_fact:
+        teams_new_owner: "{{ entra_manager if entra_manager is defined else entra_fallback_resp.json }}"
+      when: entra_manager is defined or entra_fallback_resp.json is defined
+
+    - name: Entra ID | Record lookup
+      ansible.builtin.set_fact:
+        offboard_log: >-
+          {{ offboard_log + [
+               '[Entra ID] INFO  found ' ~ entra_user.displayName ~ ' (' ~ entra_user.id ~ '), accountEnabled=' ~ entra_user.accountEnabled,
+               '[Entra ID] INFO  manager: ' ~ (entra_manager.userPrincipalName | default('none')),
+               '[Entra ID] INFO  successor for Teams/mail: ' ~ (teams_new_owner.userPrincipalName | default('none'))
+             ] }}

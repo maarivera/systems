@@ -1,0 +1,166 @@
+---
+# Offboard one user from Okta, Entra ID, Exchange Online, Teams, Azure and AWS.
+# Normally started by rulebooks/offboarding.yml; can also be run by hand:
+#
+#   ansible-playbook site.yml -e offboard_upn=jane.doe@example.com                 # dry run (default)
+#   ansible-playbook site.yml -e offboard_upn=jane.doe@example.com -e offboard_dry_run=false
+#   ansible-playbook site.yml -e offboard_upn=jane.doe@example.com --tags okta,aws
+#
+# Order matters: access is cut first (sign-in, sessions, keys), then work is
+# handed over (mail, team ownership), then entitlements are cleaned up.
+# A failure in one system is recorded and the run carries on with the others;
+# the run fails at the end if anything went wrong.
+# Report: <report_dir>/offboarding_<user>_<timestamp>.log
+- name: Offboard user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  environment:
+    AWS_PAGER: ""
+
+  vars:
+    act: "{{ 'PLAN' if offboard_dry_run | bool else 'DONE' }}"
+    ms_needed: "{{ offboard_systems.entra_id or offboard_systems.email or offboard_systems.teams or offboard_systems.azure_rbac }}"
+    error_text: >-
+      {{ ansible_failed_task.name | default('unknown task') }}:
+      {{ ansible_failed_result.json.error.message
+         | default(ansible_failed_result.json.errorSummary
+         | default(ansible_failed_result.stderr
+         | default(ansible_failed_result.msg
+         | default('failed')))) }}
+
+  tasks:
+    - name: Validate request
+      ansible.builtin.import_tasks: tasks/validate.yml
+      tags: [always]
+
+    # ---------------------------------------------------------------- lookup
+    - name: Microsoft | Authenticate and look up user
+      when: ms_needed | bool
+      tags: [entra, email, teams, azure_rbac, azure]
+      block:
+        - name: Microsoft | Authenticate
+          ansible.builtin.include_tasks: tasks/ms_auth.yml
+        - name: Entra ID | Look up user and manager
+          ansible.builtin.include_tasks: tasks/entra_lookup.yml
+      rescue:
+        - name: Microsoft | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Microsoft] ' ~ error_text] }}"
+
+    # ------------------------------------------------- stage 1: cut access
+    - name: Okta | Offboard
+      when: offboard_systems.okta
+      tags: [okta, sso]
+      block:
+        - name: Okta | Offboard
+          ansible.builtin.include_tasks: tasks/okta.yml
+      rescue:
+        - name: Okta | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Okta] ' ~ error_text] }}"
+
+    - name: Entra ID | Block sign-in
+      when: offboard_systems.entra_id and entra_user is defined
+      tags: [entra, azure]
+      block:
+        - name: Entra ID | Block sign-in
+          ansible.builtin.include_tasks: tasks/entra_disable.yml
+      rescue:
+        - name: Entra ID | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Entra ID] ' ~ error_text] }}"
+
+    - name: AWS | Offboard
+      when: offboard_systems.aws
+      tags: [aws]
+      block:
+        - name: AWS | Offboard
+          ansible.builtin.include_tasks: tasks/aws.yml
+      rescue:
+        - name: AWS | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[AWS] ' ~ error_text] }}"
+
+    # --------------------------------------------- stage 2: hand over work
+    - name: Email | Hand over mailbox
+      when: offboard_systems.email and entra_user is defined
+      tags: [email]
+      block:
+        - name: Email | Hand over mailbox
+          ansible.builtin.include_tasks: tasks/email.yml
+      rescue:
+        - name: Email | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Email] ' ~ error_text] }}"
+
+    - name: Teams | Hand over and remove
+      when: offboard_systems.teams and entra_user is defined
+      tags: [teams]
+      block:
+        - name: Teams | Hand over and remove
+          ansible.builtin.include_tasks: tasks/teams.yml
+      rescue:
+        - name: Teams | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Teams] ' ~ error_text] }}"
+
+    # ------------------------------------------ stage 3: remove entitlements
+    - name: Azure | Remove role assignments
+      when: offboard_systems.azure_rbac and entra_user is defined
+      tags: [azure_rbac, azure]
+      block:
+        - name: Azure | Remove role assignments
+          ansible.builtin.include_tasks: tasks/azure_rbac.yml
+      rescue:
+        - name: Azure | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Azure RBAC] ' ~ error_text] }}"
+
+    - name: Entra ID | Remove groups, roles and licences
+      when: offboard_systems.entra_id and entra_user is defined
+      tags: [entra, azure]
+      block:
+        - name: Entra ID | Remove groups, roles and licences
+          ansible.builtin.include_tasks: tasks/entra_cleanup.yml
+      rescue:
+        - name: Entra ID | Record failure
+          ansible.builtin.set_fact:
+            offboard_errors: "{{ offboard_errors + ['[Entra ID] ' ~ error_text] }}"
+
+    # ----------------------------------------------------------------- report
+    - name: Report
+      tags: [always]
+      block:
+        - name: Set final status
+          ansible.builtin.set_fact:
+            offboard_status: >-
+              {{ 'FAIL' if offboard_errors | length > 0
+                 else 'NOT FOUND' if (offboard_found.values() | select | list | length) == 0
+                 else 'PASS' }}
+            offboard_report: "{{ report_dir }}/offboarding_{{ offboard_upn | regex_replace('[^A-Za-z0-9._-]', '_') }}_{{ offboard_run_id }}.log"
+
+        - name: Create report directory
+          ansible.builtin.file:
+            path: "{{ report_dir }}"
+            state: directory
+            mode: "0750"
+
+        - name: Write report
+          ansible.builtin.template:
+            src: templates/offboarding_report.j2
+            dest: "{{ offboard_report }}"
+            mode: "0640"
+
+        - name: Offboarding result
+          ansible.builtin.assert:
+            that: offboard_status == 'PASS'
+            fail_msg: >-
+              Offboarding {{ offboard_status }} for {{ offboard_upn }}
+              ({{ offboard_errors | join('; ') if offboard_errors else 'user not found in any enabled system - check the UPN' }}).
+              See {{ offboard_report }}
+            success_msg: >-
+              Offboarding {{ 'dry run ' if offboard_dry_run | bool else '' }}PASSED for {{ offboard_upn }}
+              (found in: {{ offboard_found | dict2items | selectattr('value') | map(attribute='key') | join(', ') }}).
+              See {{ offboard_report }}

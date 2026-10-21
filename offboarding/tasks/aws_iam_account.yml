@@ -1,0 +1,91 @@
+---
+# One AWS account (loop var: aws_account). Deactivates access keys, removes the
+# console password and group memberships, and tags the user. The IAM user is
+# kept (not deleted) so CloudTrail and resource ownership stay traceable.
+- name: "AWS {{ aws_account.name }} | Look up IAM user"
+  ansible.builtin.command:
+    argv: [aws, iam, get-user, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}", --output, json]
+  register: aws_user
+  changed_when: false
+  failed_when: aws_user.rc != 0 and 'NoSuchEntity' not in aws_user.stderr
+
+- name: "AWS {{ aws_account.name }} | Record user not found"
+  ansible.builtin.set_fact:
+    offboard_found: "{{ offboard_found | combine({'aws_' ~ aws_account.name: false}) }}"
+    offboard_log: "{{ offboard_log + ['[AWS ' ~ aws_account.name ~ '] INFO  IAM user ' ~ aws_iam_username ~ ' not found'] }}"
+  when: aws_user.rc != 0
+
+- name: "AWS {{ aws_account.name }} | Offboard IAM user"
+  when: aws_user.rc == 0
+  vars:
+    aws_tag: "[AWS {{ aws_account.name }}]"
+  block:
+    - name: "AWS {{ aws_account.name }} | List access keys"
+      ansible.builtin.command:
+        argv: [aws, iam, list-access-keys, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}", --output, json]
+      register: aws_keys
+      changed_when: false
+
+    - name: "AWS {{ aws_account.name }} | Check console password"
+      ansible.builtin.command:
+        argv: [aws, iam, get-login-profile, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}", --output, json]
+      register: aws_login
+      changed_when: false
+      failed_when: aws_login.rc != 0 and 'NoSuchEntity' not in aws_login.stderr
+
+    - name: "AWS {{ aws_account.name }} | List groups"
+      ansible.builtin.command:
+        argv: [aws, iam, list-groups-for-user, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}", --output, json]
+      register: aws_groups
+      changed_when: false
+
+    - name: "AWS {{ aws_account.name }} | List directly attached policies"
+      ansible.builtin.command:
+        argv: [aws, iam, list-attached-user-policies, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}", --output, json]
+      register: aws_policies
+      changed_when: false
+
+    - name: "AWS {{ aws_account.name }} | Summarise IAM user"
+      ansible.builtin.set_fact:
+        aws_active_keys: "{{ (aws_keys.stdout | from_json).AccessKeyMetadata | selectattr('Status', 'equalto', 'Active') | map(attribute='AccessKeyId') | list }}"
+        aws_user_groups: "{{ (aws_groups.stdout | from_json).Groups | map(attribute='GroupName') | list }}"
+        aws_user_policies: "{{ (aws_policies.stdout | from_json).AttachedPolicies | map(attribute='PolicyName') | list }}"
+        aws_has_console: "{{ aws_login.rc == 0 }}"
+
+    - name: "AWS {{ aws_account.name }} | Deactivate access keys"
+      ansible.builtin.command:
+        argv: [aws, iam, update-access-key, --user-name, "{{ aws_iam_username }}", --access-key-id, "{{ item }}", --status, Inactive, --profile, "{{ aws_account.profile }}"]
+      loop: "{{ aws_active_keys }}"
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: "AWS {{ aws_account.name }} | Remove console password"
+      ansible.builtin.command:
+        argv: [aws, iam, delete-login-profile, --user-name, "{{ aws_iam_username }}", --profile, "{{ aws_account.profile }}"]
+      when: not offboard_dry_run | bool and aws_has_console | bool
+      changed_when: true
+
+    - name: "AWS {{ aws_account.name }} | Remove from groups"
+      ansible.builtin.command:
+        argv: [aws, iam, remove-user-from-group, --user-name, "{{ aws_iam_username }}", --group-name, "{{ item }}", --profile, "{{ aws_account.profile }}"]
+      loop: "{{ aws_user_groups }}"
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: "AWS {{ aws_account.name }} | Tag user as offboarded"
+      ansible.builtin.command:
+        argv: [aws, iam, tag-user, --user-name, "{{ aws_iam_username }}", --tags, "Key=offboarded,Value={{ offboard_started[:10] }}", --profile, "{{ aws_account.profile }}"]
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: "AWS {{ aws_account.name }} | Record result"
+      ansible.builtin.set_fact:
+        offboard_found: "{{ offboard_found | combine({'aws_' ~ aws_account.name: true}) }}"
+        offboard_log: >-
+          {{ offboard_log
+             + [aws_tag ~ ' INFO  IAM user ' ~ aws_iam_username ~ ' found']
+             + (aws_active_keys | map('regex_replace', '^', aws_tag ~ ' ' ~ act ~ '  deactivate access key ') | list)
+             + ([aws_tag ~ ' ' ~ act ~ '  remove console password'] if aws_has_console | bool else [])
+             + (aws_user_groups | map('regex_replace', '^', aws_tag ~ ' ' ~ act ~ '  remove from group ') | list)
+             + [aws_tag ~ ' ' ~ act ~ '  tag offboarded=' ~ offboard_started[:10]]
+             + (aws_user_policies | map('regex_replace', '^', aws_tag ~ ' WARN  directly attached policy left in place (no keys/console, so unusable): ') | list) }}

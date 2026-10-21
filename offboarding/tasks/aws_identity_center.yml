@@ -1,0 +1,96 @@
+---
+# Remove the user's IAM Identity Center group memberships and direct
+# account assignments. Identity Center has no "disable user" API.
+- name: AWS IdC | Set CLI connection arguments
+  ansible.builtin.set_fact:
+    idc_args: >-
+      {{ (['--profile', aws_identity_center.profile] if aws_identity_center.profile | default('') | length > 0 else [])
+         + ['--region', aws_identity_center.region, '--output', 'json'] }}
+
+- name: AWS IdC | Look up user
+  ansible.builtin.command:
+    argv: >-
+      {{ ['aws', 'identitystore', 'get-user-id',
+          '--identity-store-id', aws_identity_center.identity_store_id,
+          '--alternate-identifier',
+          {'UniqueAttribute': {'AttributePath': 'userName', 'AttributeValue': aws_identity_center.username}} | to_json]
+         + idc_args }}
+  register: idc_user
+  changed_when: false
+  failed_when: idc_user.rc != 0 and 'ResourceNotFoundException' not in idc_user.stderr
+
+- name: AWS IdC | Record user not found
+  ansible.builtin.set_fact:
+    offboard_found: "{{ offboard_found | combine({'aws_identity_center': false}) }}"
+    offboard_log: "{{ offboard_log + ['[AWS IdC] INFO  user ' ~ aws_identity_center.username ~ ' not found'] }}"
+  when: idc_user.rc != 0
+
+- name: AWS IdC | Offboard user
+  when: idc_user.rc == 0
+  vars:
+    idc_user_id: "{{ (idc_user.stdout | from_json).UserId }}"
+  block:
+    - name: AWS IdC | List group memberships
+      ansible.builtin.command:
+        argv: >-
+          {{ ['aws', 'identitystore', 'list-group-memberships-for-member',
+              '--identity-store-id', aws_identity_center.identity_store_id,
+              '--member-id', {'UserId': idc_user_id} | to_json]
+             + idc_args }}
+      register: idc_memberships
+      changed_when: false
+
+    - name: AWS IdC | List direct account assignments
+      ansible.builtin.command:
+        argv: >-
+          {{ ['aws', 'sso-admin', 'list-account-assignments-for-principal',
+              '--instance-arn', aws_identity_center.instance_arn,
+              '--principal-id', idc_user_id, '--principal-type', 'USER']
+             + idc_args }}
+      register: idc_assignments
+      changed_when: false
+      when: aws_identity_center.instance_arn | default('') | length > 0
+
+    - name: AWS IdC | Summarise user
+      ansible.builtin.set_fact:
+        idc_group_memberships: "{{ (idc_memberships.stdout | from_json).GroupMemberships }}"
+        idc_account_assignments: >-
+          {{ ((idc_assignments.stdout | default('{}') | from_json).AccountAssignments | default([]))
+             | selectattr('PrincipalType', 'equalto', 'USER') | list }}
+
+    - name: AWS IdC | Remove group memberships
+      ansible.builtin.command:
+        argv: >-
+          {{ ['aws', 'identitystore', 'delete-group-membership',
+              '--identity-store-id', aws_identity_center.identity_store_id,
+              '--membership-id', item.MembershipId]
+             + idc_args }}
+      loop: "{{ idc_group_memberships }}"
+      loop_control:
+        label: "{{ item.GroupId }}"
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: AWS IdC | Remove direct account assignments
+      ansible.builtin.command:
+        argv: >-
+          {{ ['aws', 'sso-admin', 'delete-account-assignment',
+              '--instance-arn', aws_identity_center.instance_arn,
+              '--target-id', item.AccountId, '--target-type', 'AWS_ACCOUNT',
+              '--permission-set-arn', item.PermissionSetArn,
+              '--principal-type', 'USER', '--principal-id', idc_user_id]
+             + idc_args }}
+      loop: "{{ idc_account_assignments }}"
+      loop_control:
+        label: "{{ item.AccountId }} {{ item.PermissionSetArn | basename }}"
+      when: not offboard_dry_run | bool
+      changed_when: true
+
+    - name: AWS IdC | Record result
+      ansible.builtin.set_fact:
+        offboard_found: "{{ offboard_found | combine({'aws_identity_center': true}) }}"
+        offboard_log: >-
+          {{ offboard_log
+             + ['[AWS IdC] INFO  user ' ~ aws_identity_center.username ~ ' found (' ~ idc_user_id ~ ')']
+             + (idc_group_memberships | map(attribute='GroupId') | map('regex_replace', '^', '[AWS IdC] ' ~ act ~ '  remove from group ') | list)
+             + (idc_account_assignments | map(attribute='AccountId') | map('regex_replace', '^', '[AWS IdC] ' ~ act ~ '  remove direct assignment in account ') | list) }}

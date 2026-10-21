@@ -1,0 +1,51 @@
+---
+# Event-Driven Ansible: offboard a user when the HR system reports a termination.
+#
+# Run from the offboarding/ directory:
+#   export WEBHOOK_TOKEN=$(openssl rand -hex 32)
+#   ansible-rulebook -r rulebooks/offboarding.yml -i inventory/hosts.ini \
+#     --env-vars WEBHOOK_TOKEN --verbose
+#
+# The HR system (or an integration such as Workday / BambooHR / ServiceNow
+# webhooks) POSTs to http://<host>:5000/endpoint with the header
+#   Authorization: Bearer <WEBHOOK_TOKEN>
+# and a JSON body like examples/termination_event.json.
+#
+# Whether changes are actually made is controlled by offboard_dry_run in
+# inventory/group_vars/all.yml, not by the event.
+- name: Offboard users on HR termination events
+  hosts: localhost
+  sources:
+    - name: hr_webhook
+      ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+        token: "{{ WEBHOOK_TOKEN }}"
+
+  rules:
+    - name: Offboard terminated employee
+      condition: >-
+        event.payload.event_type == "employee.terminated"
+        and event.payload.employee.upn is defined
+      action:
+        run_playbook:
+          name: site.yml
+          extra_vars:
+            offboard_upn: "{{ event.payload.employee.upn }}"
+            offboard_ticket: "{{ event.payload.reference | default('') }}"
+            offboard_requested_by: "EDA hr_webhook"
+      # On Ansible Automation Platform, replace run_playbook with:
+      #   run_job_template:
+      #     name: Offboard user
+      #     organization: Default
+      #     job_args:
+      #       extra_vars:
+      #         offboard_upn: "{{ event.payload.employee.upn }}"
+
+    - name: Reject termination event without a UPN
+      condition: >-
+        event.payload.event_type == "employee.terminated"
+        and event.payload.employee.upn is not defined
+      action:
+        debug:
+          msg: "Termination event has no employee.upn, nothing offboarded: {{ event.payload }}"

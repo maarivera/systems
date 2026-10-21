@@ -1,0 +1,20 @@
+---
+- name: AWS | Check the AWS CLI is installed
+  ansible.builtin.command: aws --version
+  changed_when: false
+
+- name: AWS | Offboard IAM user in each account
+  ansible.builtin.include_tasks: aws_iam_account.yml
+  loop: "{{ aws_accounts }}"
+  loop_control:
+    loop_var: aws_account
+    label: "{{ aws_account.name }}"
+
+- name: AWS | Offboard IAM Identity Center user
+  ansible.builtin.include_tasks: aws_identity_center.yml
+  when: aws_identity_center.identity_store_id | default('') | length > 0
+
+- name: AWS | Record nothing configured
+  ansible.builtin.set_fact:
+    offboard_log: "{{ offboard_log + ['[AWS] INFO  no aws_accounts or aws_identity_center configured'] }}"
+  when: aws_accounts | length == 0 and aws_identity_center.identity_store_id | default('') | length == 0

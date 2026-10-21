@@ -1,0 +1,20 @@
+---
+# ---------------------------------------------------------------------------
+# Package list
+# ---------------------------------------------------------------------------
+# File on the control node listing the packages to install, one per line.
+# Blank lines and anything after '#' are ignored.
+# Override per group (inventory/group_vars/<group>.yml), per host, or at run
+# time with: -e packages_file=/path/to/list.txt
+packages_file: "{{ playbook_dir }}/files/packages.txt"
+
+# present = install if missing (leave installed versions alone)
+# latest  = install if missing and upgrade to the newest available version
+package_state: present
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+# Report written on each target server: <log_dir>/package_install_<YYYYMMDD>.log
+log_dir: /var/log
+log_date: "{{ ansible_facts.date_time.date | replace('-', '') }}"
