@@ -32,7 +32,7 @@ See each project's own README for full details and configuration.
 ## Getting started
 
 ```bash
-git clone https://github.com/mustache-man/systems.git
+git clone https://github.com/maarivera/systems.git
 cd systems/patching
 
 vi inventory/hosts.ini              # add your servers under [patch_targets]
